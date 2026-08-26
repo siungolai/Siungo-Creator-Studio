@@ -22,23 +22,28 @@
 
 ## 开发路线
 
-| 里程碑 | 内容 |
-|--------|------|
-| M1 骨架 | 数据表 + `/creator` 路由/导航 + 列表 CRUD |
-| M2 AI 生成 | DeepSeek 接入 + 生成面板 + 版本历史 |
-| M3 发布管理 | 平台配置 + 发布状态维护 |
-| M4 选题 + 设置 | AI 选题建议 + 设置弹层 |
-| M5 收尾 | 失败重试打磨 + 文档同步 |
+| 里程碑 | 内容 | 状态 |
+|--------|------|------|
+| M0 骨架+认证 | 项目骨架、验证链路、单密码登录（持久会话） | ✅ 已完成 |
+| M1 骨架 | 数据表 + `/creator` 路由/导航 + 列表 CRUD | ⏳ 进行中 |
+| M2 AI 生成 | DeepSeek 接入 + 生成面板 + 版本历史 | ⏳ |
+| M3 发布管理 | 平台配置 + 发布状态维护 | ⏳ |
+| M4 选题 + 设置 | AI 选题建议 + 设置弹层 | ⏳ |
+| M5 收尾 | 失败重试打磨 + 文档同步 | ⏳ |
 
 ## 本地开发
 
 ```bash
-# 后端（默认 127.0.0.1:8081）
-cd server && go run .
+# 后端（默认 127.0.0.1:8081；STUDIO_PASSWORD 必设，缺失拒绝启动）
+cd server && export STUDIO_PASSWORD=<你的密码> && go run .
 
 # 前端（Vite 5173，/api 代理到后端）
 cd web && npm install && npm run dev
 ```
+
+- 浏览器访问 **http://127.0.0.1:8081**（后端已内嵌前端产物，单二进制形态）或 http://localhost:5173（dev 模式）
+- 环境变量：`HOST`（默认 127.0.0.1）、`PORT`（默认 8081）、`DB_PATH`（默认 data.db）、`AUTH_FAIL_COOLDOWN`（登录冷却秒数）、`COOKIE_SECURE=true`（https 部署）、`TRUST_XFF=true`（nginx 反代）；AI 相关见下
+- 验证：`bash scripts/verify.sh`（构建全绿）｜ `bash scripts/smoke.sh`（构建 + 起服务 + api-test 断言）
 
 AI 功能需配置环境变量 `AI_API_KEY`（DeepSeek API key）等；缺失时 AI 功能返回明确错误提示，其余功能不受影响。
 

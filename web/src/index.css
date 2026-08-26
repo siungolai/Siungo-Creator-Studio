@@ -1,0 +1,30 @@
+@import "tailwindcss";
+
+/* 项目语义 token（web-frontend 规范：设计令牌集中定义，不散落魔法值）。
+   亮/暗通过 Tailwind dark: 变体（prefers-color-scheme）切换；换主题只改此处。 */
+@theme {
+  /* 颜色 */
+  --color-page: #fafafa; /* 页面背景（亮） */
+  --color-page-dark: #0a0a0a; /* 页面背景（暗） */
+  --color-card: #ffffff; /* 卡片/表面 */
+  --color-card-dark: #171717;
+  --color-line: #e5e5e5; /* 边框（弱） */
+  --color-line-dark: #262626;
+  --color-line-strong: #d4d4d4; /* 边框（强，按钮描边） */
+  --color-line-strong-dark: #404040;
+  --color-ink: #171717; /* 主文字 */
+  --color-ink-dark: #fafafa;
+  --color-muted: #737373; /* 辅助文字 */
+  --color-muted-dark: #a3a3a3;
+  --color-hover: #f5f5f5; /* 悬浮底色 */
+  --color-hover-dark: #262626;
+  --color-accent: #171717; /* 主按钮背景 */
+  --color-accent-dark: #fafafa;
+  --color-accent-ink: #fafafa; /* 主按钮文字 */
+  --color-accent-ink-dark: #171717;
+  --color-danger: #ef4444; /* 错误/删除 */
+
+  /* 圆角 */
+  --radius-card: 0.5rem; /* 卡片/弹层 rounded-lg */
+  --radius-control: 0.375rem; /* 按钮/输入 rounded-md */
+}

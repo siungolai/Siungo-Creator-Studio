@@ -3,6 +3,7 @@
 
 # 临时脚本与缓存（Windows/DSH 沙箱环境）
 .tmp-gh/
+.scratch/
 .gocache/
 .gomod/
 .npm-cache/
@@ -18,6 +19,14 @@ dist/
 # Go 编译产物
 server/server
 server/*.exe
+
+# SQLite 数据库（本地数据不入库）
+server/*.db
+server/*.db-*
+
+# 前端构建产物（go:embed 目标，仅占位文件入库）
+server/static/*
+!server/static/PLACEHOLDER
 
 # 环境变量（密钥不入库）
 .env
