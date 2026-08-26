@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/auth"
+	"github.com/siungolai/Siungo-Creator-Studio/server/internal/creator"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/db"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/health"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/httpx"
@@ -46,14 +47,16 @@ func main() {
 		log.Fatalf("auth: %v", err)
 	}
 
+	creatorSvc := creator.NewService(creator.NewSQLiteStore(conn))
+
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/health", health.Handler())
 	mux.Handle("/api/v1/login", authSvc.LoginHandler())
 	mux.Handle("/api/v1/logout", authSvc.LogoutHandler())
 	mux.Handle("/api/v1/me", authSvc.MeHandler())
 
-	// 受保护 API 区：后续里程碑（作品/生成/发布/选题/设置/日志）注册于此
-	protected := authSvc.Middleware(http.NewServeMux())
+	// 受保护 API 区：认证中间件包裹；后续里程碑（生成/发布/选题/设置/日志）挂载于此
+	protected := authSvc.Middleware(creatorSvc.Routes())
 	mux.Handle("/api/v1/", protected)
 
 	mux.Handle("/", web.SPAHandler(staticFS))

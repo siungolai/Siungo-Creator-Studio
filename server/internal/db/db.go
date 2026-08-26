@@ -37,10 +37,38 @@ func migrate(conn *sql.DB) error {
 			created_at TEXT NOT NULL,
 			expires_at TEXT NOT NULL
 		)`,
+		`CREATE TABLE IF NOT EXISTS platforms (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			sort INTEGER NOT NULL DEFAULT 0,
+			enabled INTEGER NOT NULL DEFAULT 1
+		)`,
+		`CREATE TABLE IF NOT EXISTS works (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			title TEXT NOT NULL DEFAULT '',
+			topic TEXT NOT NULL DEFAULT '',
+			style TEXT NOT NULL DEFAULT 'default',
+			script TEXT NOT NULL DEFAULT '',
+			active_version_id INTEGER,
+			tags TEXT NOT NULL DEFAULT '[]',
+			status TEXT NOT NULL DEFAULT 'draft',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		)`,
 	}
 	for _, s := range stmts {
 		if _, err := conn.Exec(s); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	// 平台基础数据预置（表驱动扩展：改数据即加平台；T3 验收项）
+	seeds := []string{
+		`INSERT OR IGNORE INTO platforms (id, name, sort, enabled) VALUES ('douyin', '抖音', 1, 1)`,
+		`INSERT OR IGNORE INTO platforms (id, name, sort, enabled) VALUES ('bilibili', 'B站', 2, 1)`,
+	}
+	for _, s := range seeds {
+		if _, err := conn.Exec(s); err != nil {
+			return fmt.Errorf("seed: %w", err)
 		}
 	}
 	return nil

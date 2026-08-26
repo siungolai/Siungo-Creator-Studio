@@ -3,8 +3,9 @@ import { Navigate, Route, Routes } from 'react-router'
 import { api } from './api/client'
 import Login from './Login'
 
-// 路由级懒加载（web-frontend 规范：代码分割；T3 起各页面沿用此模式）
+// 路由级懒加载（web-frontend 规范：代码分割；各页面沿用此模式）
 const Creator = lazy(() => import('./pages/Creator'))
+const WorkDetail = lazy(() => import('./pages/WorkDetail'))
 
 // 应用壳：认证守卫（T2）。
 // 未登录 → 登录页；已登录 → 顶栏（登出）+ 路由区（/ 重定向 /creator）。
@@ -57,6 +58,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/creator" replace />} />
             <Route path="/creator" element={<Creator />} />
+            <Route path="/creator/:id" element={<WorkDetail />} />
             <Route path="*" element={<Navigate to="/creator" replace />} />
           </Routes>
         </Suspense>

@@ -18,13 +18,18 @@ interface RequestOptions {
 async function request<T>(path: string, init?: RequestInit, opts: RequestOptions = {}): Promise<T> {
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
-    // 默认 30s 超时（弱网/服务异常不无限挂起）；调用方可传自己的 signal 覆盖
-    signal: init?.signal ?? AbortSignal.timeout(30_000),
+    // 默认 30s 超时；调用方传 signal 时与超时组合（任一触发即中止）
+    signal: init?.signal
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
+      : AbortSignal.timeout(30_000),
     ...init,
   })
   if (res.status === 401 && opts.authRedirect !== false) {
     window.location.href = '/login'
     throw new ApiError(401, '未登录')
+  }
+  if (res.status === 204) {
+    return undefined as T
   }
   if (!res.ok) {
     throw new ApiError(res.status, await errorMessage(res))
@@ -42,6 +47,9 @@ async function errorMessage(res: Response): Promise<string> {
   }
   return `请求失败（${res.status}）`
 }
+
+// 供各领域 api 模块复用（如 api/creator.ts）；业务模块禁止散落裸 fetch。
+export { request }
 
 export const api = {
   // me 是登录态探测接口：401 是正常结果（未登录），由调用方渲染登录页，绝不触发整页跳转
