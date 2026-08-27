@@ -13,15 +13,18 @@ export class ApiError extends Error {
 interface RequestOptions {
   /** 401 时是否跳转登录页（登录接口自身除外） */
   authRedirect?: boolean
+  /** 超时毫秒数（默认 30s；长任务如 AI 生成可覆盖，上限与后端 600s 一致） */
+  timeoutMs?: number
 }
 
 async function request<T>(path: string, init?: RequestInit, opts: RequestOptions = {}): Promise<T> {
+  const timeoutMs = opts.timeoutMs ?? 30_000
   const res = await fetch(path, {
     headers: { 'Content-Type': 'application/json', ...init?.headers },
     // 默认 30s 超时；调用方传 signal 时与超时组合（任一触发即中止）
     signal: init?.signal
-      ? AbortSignal.any([init.signal, AbortSignal.timeout(30_000)])
-      : AbortSignal.timeout(30_000),
+      ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)])
+      : AbortSignal.timeout(timeoutMs),
     ...init,
   })
   if (res.status === 401 && opts.authRedirect !== false) {

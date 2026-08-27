@@ -13,6 +13,9 @@ import (
 // ErrInvalid 输入校验失败（HTTP 400 语义）。
 var ErrInvalid = errors.New("creator: invalid input")
 
+// ErrAIUnavailable AI 能力不可用（key 未配置；HTTP 503 语义）。
+var ErrAIUnavailable = errors.New("creator: AI 功能不可用（AI_API_KEY 未配置）")
+
 // 输入长度上限（后端不信任客户端输入：超长请求拒绝）。
 const (
 	maxTopicLen  = 200   // 主题/要点
@@ -39,20 +42,43 @@ var validStatuses = map[string]bool{
 	"draft": true, "making": true, "published": true, "archived": true,
 }
 
+// 发布状态（T9：待发布 / 已发布）。
+var validPubStatuses = map[string]bool{"pending": true, "published": true}
+
+// 发布字段长度上限（后端不信任客户端输入）。
+const (
+	maxURLlen  = 500 // 发布链接
+	maxNoteLen = 500 // 平台备注
+)
+
 // CreateWorkRequest 新建作品入参。
 type CreateWorkRequest struct {
 	Topic string `json:"topic"` // 主题/要点，必填（AI 生成输入）
 	Title string `json:"title"` // 标题，可空（AI 生成后回填候选，G9）
 }
 
-// Service 作品业务逻辑（HTTP 无关）。
-type Service struct {
-	store Store
+// PromptSettings 生成提示词覆盖值读取（由 settings.Service 实现，main 注入；
+// 避免 creator → settings 直接依赖，与 ai.TimeoutReader 同模式）。
+type PromptSettings interface {
+	GenerateSystemPrompt(ctx context.Context) (string, error)      // 未设置返回 ""（回退内置默认）
+	GenerateUserPromptTemplate(ctx context.Context) (string, error) // 未设置返回 ""（回退内置默认）
 }
 
-// NewService 构建作品服务。
-func NewService(store Store) *Service {
-	return &Service{store: store}
+// Service 作品业务逻辑（HTTP 无关）。
+type Service struct {
+	store          Store
+	ai             AI // 生成能力（T7；可为 nil）
+	promptSettings PromptSettings // 提示词覆盖（Issue 18；可 nil = 内置默认）
+}
+
+// NewService 构建作品服务；ai 为生成能力（nil 时生成接口返回 ErrAIUnavailable）。
+func NewService(store Store, ai AI) *Service {
+	return &Service{store: store, ai: ai}
+}
+
+// AttachPromptSettings 注入生成提示词覆盖读取（main 装配时调用一次；可 nil）。
+func (s *Service) AttachPromptSettings(ps PromptSettings) {
+	s.promptSettings = ps
 }
 
 // CreateWork 校验并创建草稿作品；初始状态 draft、风格 default、标签空（T4 起可编辑）。
@@ -104,6 +130,20 @@ func (s *Service) ListWorks(ctx context.Context, f WorkFilter) (WorkPage, error)
 	if err != nil {
 		return WorkPage{}, err
 	}
+	// 批量附带发布进度摘要（一次查询防 N+1）
+	if len(items) > 0 {
+		ids := make([]int64, 0, len(items))
+		for _, w := range items {
+			ids = append(ids, w.ID)
+		}
+		byWork, err := s.store.ListPublicationsForWorks(ctx, ids)
+		if err != nil {
+			return WorkPage{}, err
+		}
+		for i := range items {
+			items[i].Publications = byWork[items[i].ID]
+		}
+	}
 	return WorkPage{Items: items, Total: total, Limit: f.Limit, Offset: f.Offset}, nil
 }
 
@@ -115,9 +155,16 @@ type WorkPage struct {
 	Offset int    `json:"offset"`
 }
 
-// GetWork 作品详情；不存在返回 ErrNotFound（404）。
+// GetWork 作品详情（附带发布记录）；不存在返回 ErrNotFound（404）。
 func (s *Service) GetWork(ctx context.Context, id int64) (Work, error) {
-	return s.store.GetWork(ctx, id)
+	w, err := s.store.GetWork(ctx, id)
+	if err != nil {
+		return Work{}, err
+	}
+	if err := s.attachPublications(ctx, &w); err != nil {
+		return Work{}, err
+	}
+	return w, nil
 }
 
 // UpdateWorkRequest 更新作品入参（全量更新基本信息 + 工作副本）。
@@ -187,4 +234,80 @@ func (s *Service) DeleteWork(ctx context.Context, id int64) error {
 // ListPlatforms 平台列表（预置 抖音/B站，按 sort 排序）。
 func (s *Service) ListPlatforms(ctx context.Context) ([]Platform, error) {
 	return s.store.ListPlatforms(ctx)
+}
+
+// ListPublications 作品发布记录列表（懒补启用平台记录后返回，按平台 sort）。
+// 作品不存在返回 ErrNotFound（404）。
+func (s *Service) ListPublications(ctx context.Context, workID int64) ([]Publication, error) {
+	if err := s.store.EnsurePublications(ctx, workID); err != nil {
+		return nil, err
+	}
+	return s.store.ListPublications(ctx, workID)
+}
+
+// UpdatePublicationRequest 发布记录更新入参（T9）。
+type UpdatePublicationRequest struct {
+	Status      string  `json:"status"`                // pending | published
+	VersionID   *int64  `json:"versionId"`             // 绑定的版本（可空；须属于该作品）
+	URL         string  `json:"url"`                   // 发布链接（选填）
+	PublishedAt *string `json:"publishedAt"`           // 发布时间（选填；标记发布未传则自动取当前）
+	Note        string  `json:"note"`                  // 平台备注（选填）
+}
+
+// UpdatePublication 更新发布记录并应用状态机语义：
+//   - status → published：published_at 未提供 → 自动取当前时间；提供则用之（可覆盖）
+//   - status → pending：清空 published_at（回退待发布）
+//   - version_id 若提供须属于该作品（越权绑定拒绝）；url/note 长度上限校验。
+func (s *Service) UpdatePublication(ctx context.Context, workID, pubID int64, req UpdatePublicationRequest) (Publication, error) {
+	if !validPubStatuses[req.Status] {
+		return Publication{}, fmt.Errorf("%w: invalid publication status", ErrInvalid)
+	}
+	if len([]rune(req.URL)) > maxURLlen {
+		return Publication{}, fmt.Errorf("%w: url too long (max %d)", ErrInvalid, maxURLlen)
+	}
+	if len([]rune(req.Note)) > maxNoteLen {
+		return Publication{}, fmt.Errorf("%w: note too long (max %d)", ErrInvalid, maxNoteLen)
+	}
+	if req.VersionID != nil {
+		// 版本归属校验（该版本必须属于此作品）
+		if _, err := s.store.GetVersion(ctx, workID, *req.VersionID); err != nil {
+			return Publication{}, fmt.Errorf("%w: version not in work", ErrInvalid)
+		}
+	}
+
+	pub, err := s.store.GetPublication(ctx, workID, pubID)
+	if err != nil {
+		return Publication{}, err // 404 语义
+	}
+
+	// 状态机：发布时间自动/清空逻辑
+	var publishedAt *string
+	if req.Status == "published" {
+		t := req.PublishedAt
+		if t == nil || strings.TrimSpace(*t) == "" {
+			now := db.NowUTC()
+			t = &now
+		}
+		publishedAt = t
+	} else {
+		publishedAt = nil // pending：清空
+	}
+
+	pub.Status = req.Status
+	pub.VersionID = req.VersionID
+	pub.URL = strings.TrimSpace(req.URL)
+	pub.PublishedAt = publishedAt
+	pub.Note = strings.TrimSpace(req.Note)
+	pub.UpdatedAt = db.NowUTC()
+	return s.store.UpdatePublication(ctx, pub)
+}
+
+// attachPublications 详情附带发布记录（懒补 + 查询）。
+func (s *Service) attachPublications(ctx context.Context, w *Work) error {
+	pubs, err := s.ListPublications(ctx, w.ID)
+	if err != nil {
+		return err
+	}
+	w.Publications = pubs
+	return nil
 }

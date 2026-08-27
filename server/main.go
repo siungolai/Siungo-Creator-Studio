@@ -15,16 +15,27 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/siungolai/Siungo-Creator-Studio/server/internal/ai"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/auth"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/creator"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/db"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/health"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/httpx"
+	"github.com/siungolai/Siungo-Creator-Studio/server/internal/settings"
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/web"
 )
 
 //go:embed static
 var staticFS embed.FS
+
+// checkAIStatus 启动时报告 AI 服务状态（不输出任何 key 内容）。
+func checkAIStatus(aiSvc *ai.Service) {
+	if aiSvc.GetEffectiveProvider() != nil {
+		log.Printf("ai: ready（model=%s）", aiSvc.EffectiveModel())
+		return
+	}
+	log.Printf("ai: API Key 未配置，AI 功能不可用——请登录后在「AI 设置」中输入 DeepSeek API Key")
+}
 
 func main() {
 	cfg := LoadConfig()
@@ -47,7 +58,16 @@ func main() {
 		log.Fatalf("auth: %v", err)
 	}
 
-	creatorSvc := creator.NewService(creator.NewSQLiteStore(conn))
+	settingsSvc := settings.NewService(settings.NewStore(conn))
+
+	// AI 装配：key 不再走环境变量，运行时经网页「AI 设置」写入内存（重启/清空即失效）
+	apiKeyMgr := ai.NewAPIKeyManager()
+	aiSvc := ai.NewService(nil, ai.NewAuditStore(conn), settingsSvc)
+	aiSvc.AttachAPIKeyManager(apiKeyMgr, cfg.AIBaseURL, cfg.AIModel)
+	checkAIStatus(aiSvc)
+
+	creatorSvc := creator.NewService(creator.NewSQLiteStore(conn), aiSvc)
+	creatorSvc.AttachPromptSettings(settingsSvc) // Issue 18：生成提示词可覆盖（settings 表）
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/v1/health", health.Handler())
@@ -55,8 +75,12 @@ func main() {
 	mux.Handle("/api/v1/logout", authSvc.LogoutHandler())
 	mux.Handle("/api/v1/me", authSvc.MeHandler())
 
-	// 受保护 API 区：认证中间件包裹；后续里程碑（生成/发布/选题/设置/日志）挂载于此
-	protected := authSvc.Middleware(creatorSvc.Routes())
+	// AI Key 配置端点：受认证保护（key 属敏感项，未登录不可探测/写入）
+	mux.Handle("GET /api/v1/ai/status", authSvc.Middleware(ai.StatusHandler(aiSvc)))
+	mux.Handle("POST /api/v1/ai/configure", authSvc.Middleware(ai.ConfigureHandler(aiSvc)))
+
+	// 受保护 API 区：认证中间件包裹；后续里程碑（生成/发布/选题/日志）挂载于此
+	protected := authSvc.Middleware(creatorSvc.Routes(settingsSvc.Handler()))
 	mux.Handle("/api/v1/", protected)
 
 	mux.Handle("/", web.SPAHandler(staticFS))

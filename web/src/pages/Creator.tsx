@@ -4,6 +4,9 @@ import { creatorApi, STATUSES, Work, WorkStatus } from '../api/creator'
 import CreateWorkDialog from '../components/CreateWorkDialog'
 import Pagination from '../components/Pagination'
 import StatusBadge from '../components/StatusBadge'
+import { APIKeyConfig } from '../components/APIKeyConfig'
+import { AIStatus } from '../components/AIStatus'
+import { PromptConfig } from '../components/PromptConfig'
 import { formatTime } from '../lib/format'
 import { useDebouncedValue } from '../lib/useDebouncedValue'
 
@@ -31,6 +34,9 @@ export default function Creator() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [showCreate, setShowCreate] = useState(false)
+  const [showAISettings, setShowAISettings] = useState(false)
+  // AI 配置变更计数：配置/清除成功后 +1，通过 key 强制 AIStatus 重挂载刷新徽标
+  const [aiRefresh, setAiRefresh] = useState(0)
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE))
 
@@ -118,16 +124,34 @@ export default function Creator() {
   const empty = !loading && pageData.length === 0
 
   return (
-    <div>
+    <div className="space-y-6">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-sm font-medium">作品列表</h2>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="min-h-10 rounded-control bg-accent px-3 py-1.5 text-xs text-accent-ink dark:bg-accent-dark dark:text-accent-ink-dark"
-        >
-          + 新建作品
-        </button>
+        <div className="flex items-center gap-3">
+          <AIStatus key={aiRefresh} />
+          <button
+            onClick={() => setShowAISettings((v) => !v)}
+            aria-expanded={showAISettings}
+            className="min-h-9 rounded-control border border-line-strong px-3 py-1.5 text-xs text-muted hover:bg-hover dark:border-line-strong-dark dark:text-muted-dark dark:hover:bg-hover-dark"
+          >
+            AI 设置
+          </button>
+          <button
+            onClick={() => setShowCreate(true)}
+            className="min-h-10 rounded-control bg-accent px-3 py-1.5 text-xs text-accent-ink dark:bg-accent-dark dark:text-accent-ink-dark"
+          >
+            + 新建作品
+          </button>
+        </div>
       </div>
+
+      {/* AI 设置折叠区：key 手动输入（后端内存，重启失效）+ 提示词自定义 */}
+      {showAISettings && (
+        <div className="space-y-3">
+          <APIKeyConfig onChanged={() => setAiRefresh((v) => v + 1)} />
+          <PromptConfig />
+        </div>
+      )}
 
       {/* 筛选区：状态 tab + 关键词搜索 */}
       <div className="mt-4 flex flex-wrap items-center justify-between gap-3">

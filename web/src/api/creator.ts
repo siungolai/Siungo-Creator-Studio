@@ -70,6 +70,60 @@ export const STYLES = [
   { key: 'tucao', label: '吐槽型' },
 ] as const
 
+// 生成面板风格选项（G9：default 不出现在下拉，前端默认干货型）
+export const GENERATE_STYLES = STYLES.filter((s) => s.key !== 'default')
+
+// 平台维度（'' 通用 | douyin | bilibili）
+export const PLATFORMS: { key: string; label: string }[] = [
+  { key: '', label: '通用' },
+  { key: 'douyin', label: '抖音' },
+  { key: 'bilibili', label: 'B站' },
+]
+
+// AI 生成输出契约（与后端 ai.GenerateOutput 同步）
+export interface GenerateOutput {
+  titles: string[]
+  script: string
+  voiceover: string
+  tags: string[]
+  cover_copy: string
+}
+
+// 作品版本（与后端 creator.Version 同步）
+export interface Version {
+  id: number
+  workId: number
+  platform: string
+  content: GenerateOutput
+  model: string
+  createdAt: string
+}
+
+export interface GenerateVersionBody {
+  platform?: string
+  topic?: string
+  style?: string
+}
+
+export interface GenerateResult {
+  version: Version
+  work: Work
+}
+
+// 模块设置（与后端 settings.settingsResponse 同步；提示词空串 = 未设置，用内置默认）
+export interface CreatorSettings {
+  aiTimeoutSeconds: number
+  generateSystemPrompt: string
+  generateUserPromptTemplate: string
+}
+
+// 部分更新：只传要改的字段；提示词传空串 = 恢复默认
+export interface UpdateCreatorSettingsBody {
+  aiTimeoutSeconds?: number
+  generateSystemPrompt?: string
+  generateUserPromptTemplate?: string
+}
+
 export const STATUSES: { key: WorkStatus; label: string }[] = [
   { key: 'draft', label: '草稿' },
   { key: 'making', label: '制作中' },
@@ -88,4 +142,19 @@ export const creatorApi = {
     request<Work>(`/api/v1/creator/works/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   deleteWork: (id: number) => request<void>(`/api/v1/creator/works/${id}`, { method: 'DELETE' }),
   listPlatforms: () => request<Platform[]>('/api/v1/creator/platforms'),
+  // 生成与版本（T7 后端已就绪）：AI 生成耗时可达数分钟，超时对齐后端上限 600s
+  generateVersion: (workId: number, body: GenerateVersionBody) =>
+    request<GenerateResult>(
+      `/api/v1/creator/works/${workId}/versions`,
+      { method: 'POST', body: JSON.stringify(body) },
+      { timeoutMs: 600_000 },
+    ),
+  listVersions: (workId: number, signal?: AbortSignal) =>
+    request<Version[]>(`/api/v1/creator/works/${workId}/versions`, { signal }),
+  activateVersion: (workId: number, versionId: number) =>
+    request<Work>(`/api/v1/creator/works/${workId}/versions/${versionId}/activate`, { method: 'PUT' }),
+  // 模块设置（Issue 18：提示词可自定义）
+  getSettings: () => request<CreatorSettings>('/api/v1/creator/settings'),
+  updateSettings: (body: UpdateCreatorSettingsBody) =>
+    request<CreatorSettings>('/api/v1/creator/settings', { method: 'PUT', body: JSON.stringify(body) }),
 }

@@ -2,11 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router'
 import { ApiError } from '../api/client'
 import { creatorApi, STATUSES, STYLES, UpdateWorkBody, Work } from '../api/creator'
+import GeneratePanel from '../components/GeneratePanel'
 import StatusBadge from '../components/StatusBadge'
+import VersionHistory from '../components/VersionHistory'
 import { formatTime } from '../lib/format'
 
-// 作品详情/编辑页（T4）：基本信息（标题/主题/风格/状态/标签）+ 工作副本编辑。
-// AI 生成面板与版本历史为 T6/T7 范围；发布管理为 T8 范围。
+// 作品详情/编辑页（T4 基本信息+工作副本；T8 接入 AI 生成面板与版本历史）。
+// 发布管理为 T9 范围。
 export default function WorkDetail() {
   const { id } = useParams()
   const workId = Number(id)
@@ -26,6 +28,17 @@ export default function WorkDetail() {
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [saved, setSaved] = useState(false)
+
+  // 版本历史刷新信号：生成新版本后自增（VersionHistory 以 key 重挂载）
+  const [versionTick, setVersionTick] = useState(0)
+
+  // 生成/选用成功后同步工作副本等表单字段（不打断用户编辑：style/topic 保持表单值）
+  const applyWork = useCallback((w: Work) => {
+    setWork(w)
+    setScript(w.script ?? '')
+    setTitle(w.title)
+    setStatus(w.status)
+  }, [])
 
   const load = useCallback(
     async (signal?: AbortSignal) => {
@@ -204,12 +217,20 @@ export default function WorkDetail() {
           </div>
         </section>
 
-        {/* 工作副本（人工编辑区；版本历史 T7 接入） */}
+        {/* AI 生成面板（T8） */}
+        <GeneratePanel
+          work={work}
+          hasVersions={versionTick > 0}
+          onGenerated={applyWork}
+          onVersionCreated={() => setVersionTick((t) => t + 1)}
+        />
+
+        {/* 工作副本（人工编辑区） */}
         <section className="rounded-card border border-line bg-card p-4 dark:border-line-dark dark:bg-card-dark">
           <div className="flex items-center justify-between">
             <h3 className="text-xs font-medium text-muted dark:text-muted-dark">工作副本（当前脚本）</h3>
             <p className="text-[10px] text-muted dark:text-muted-dark">
-              AI 生成与版本历史将在后续里程碑接入
+              来自被选用版本的内容快照，可人工编辑
             </p>
           </div>
           <textarea
@@ -221,6 +242,14 @@ export default function WorkDetail() {
             className="mt-2 w-full rounded-control border border-line-strong bg-card px-3 py-2 font-mono text-sm leading-relaxed text-ink outline-none focus:border-ink dark:border-line-strong-dark dark:bg-page dark:text-ink-dark dark:focus:border-ink-dark"
           />
         </section>
+
+        {/* 版本历史（T8） */}
+        <VersionHistory
+          key={versionTick}
+          workId={workId}
+          activeVersionId={work.activeVersionId}
+          onActivate={applyWork}
+        />
 
         {saveError && (
           <p role="alert" className="text-xs text-danger">

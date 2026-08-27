@@ -189,6 +189,140 @@ done
 resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/works")
 echo "$resp" | grep -q '"total":0' && ok "清理完成 total=0" || fail "清理未完成: $resp"
 
+# ---- 设置（T6）----
+
+# 4aa. GET settings 默认 180
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"aiTimeoutSeconds":180' && ok "设置默认 180" || fail "设置默认异常: $resp"
+
+# 4ab. PUT 越界（10 / 700）→ 400
+for v in 10 700; do
+  printf '{"aiTimeoutSeconds":%s}' "$v" > "$TMPBODY"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+  [ "$code" = "400" ] || fail "PUT $v 期望 400 实际 $code"
+done
+ok "设置越界（10/700）→ 400"
+
+# 4ac. PUT 200 → 200 且持久化
+printf '%s' '{"aiTimeoutSeconds":200}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+[ "$code" = "200" ] && ok "PUT 200 → 200" || fail "PUT 200 期望 200 实际 $code"
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"aiTimeoutSeconds":200' && ok "设置持久化 200" || fail "设置持久化异常: $resp"
+
+# 4ad. 恢复默认 180（不留测试痕迹）
+printf '%s' '{"aiTimeoutSeconds":180}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+[ "$code" = "200" ] && ok "恢复默认 180" || fail "恢复默认期望 200 实际 $code"
+
+# ---- 提示词设置（Issue 18）----
+
+# 4b1. GET 默认：提示词字段存在且为空串（未设置）
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"generateSystemPrompt":""' && ok "提示词默认未设置" || fail "提示词默认异常: $resp"
+
+# 4b2. PUT 系统提示词 + 用户模板 → 200 且回读一致（含中文：body 走文件防 GBK 乱码）
+printf '%s' '{"generateSystemPrompt":"你是测试助手。","generateUserPromptTemplate":"请处理：{topic}"}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+[ "$code" = "200" ] && ok "PUT 提示词 → 200" || fail "PUT 提示词期望 200 实际 $code"
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"generateSystemPrompt":"你是测试助手。"' && ok "系统提示词持久化" || fail "系统提示词持久化异常: $resp"
+echo "$resp" | grep -q '"generateUserPromptTemplate":"请处理：{topic}"' && ok "用户模板持久化" || fail "用户模板持久化异常: $resp"
+
+# 4b3. 只 PUT 超时 → 提示词不被清掉（部分更新兼容）
+printf '%s' '{"aiTimeoutSeconds":190}' > "$TMPBODY"
+curl -s -o /dev/null -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings"
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"generateSystemPrompt":"你是测试助手。"' && ok "部分更新不清提示词" || fail "部分更新误清提示词: $resp"
+
+# 4b4. 超长提示词 → 400
+long=$(printf '长%.0s' $(seq 1 5001))
+printf '{"generateSystemPrompt":"%s"}' "$long" > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+[ "$code" = "400" ] && ok "超长提示词 → 400" || fail "超长提示词期望 400 实际 $code"
+
+# 4b5. 清空提示词（恢复默认）+ 恢复超时 180（不留测试痕迹）
+printf '%s' '{"generateSystemPrompt":"","generateUserPromptTemplate":"","aiTimeoutSeconds":180}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/settings")
+[ "$code" = "200" ] && ok "清空提示词 → 200" || fail "清空提示词期望 200 实际 $code"
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/settings")
+echo "$resp" | grep -q '"generateSystemPrompt":""' && ok "提示词已恢复默认" || fail "提示词未恢复默认: $resp"
+
+# ---- 发布管理（T9）----
+
+# 4c1. 建作品 E → GET publications → 懒补 2 条 pending（抖音/B站）
+printf '%s' '{"topic":"T9发布测试"}' > "$TMPBODY"
+E_RESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -d @"$TMPBODY" "$BASE/api/v1/creator/works")
+E_ID=$(echo "$E_RESP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+[ -n "$E_ID" ] || fail "未取到作品 E id"
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/works/$E_ID/publications")
+echo "$resp" | grep -q '"platformId":"douyin"' && ok "懒补抖音发布记录" || fail "懒补抖音异常: $resp"
+echo "$resp" | grep -q '"platformId":"bilibili"' && ok "懒补B站发布记录" || fail "懒补B站异常: $resp"
+P_DY_ID=$(echo "$resp" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+[ -n "$P_DY_ID" ] || fail "未取到抖音发布记录 id"
+
+# 4c2. 标记发布（自动时间）→ 200 且 status=published、publishedAt 非空
+printf '%s' '{"status":"published"}' > "$TMPBODY"
+resp=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/works/$E_ID/publications/$P_DY_ID")
+echo "$resp" | grep -q '"status":"published"' && ok "标记发布 → published" || fail "标记发布异常: $resp"
+echo "$resp" | grep -q '"publishedAt"' && ok "发布时间自动记录" || fail "发布时间缺失: $resp"
+
+# 4c3. 覆盖链接/备注/时间
+printf '%s' '{"status":"published","url":"https://v.douyin.com/test","note":"首发","publishedAt":"2026-01-02T03:04:05Z"}' > "$TMPBODY"
+resp=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/works/$E_ID/publications/$P_DY_ID")
+echo "$resp" | grep -q '"url":"https://v.douyin.com/test"' && ok "发布链接可存" || fail "链接异常: $resp"
+echo "$resp" | grep -q '"note":"首发"' && ok "备注可存" || fail "备注异常: $resp"
+echo "$resp" | grep -q '"publishedAt":"2026-01-02T03:04:05Z"' && ok "发布时间可覆盖" || fail "时间覆盖异常: $resp"
+
+# 4c4. 回退待发布 → 清空 publishedAt
+printf '%s' '{"status":"pending"}' > "$TMPBODY"
+resp=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/works/$E_ID/publications/$P_DY_ID")
+echo "$resp" | grep -q '"status":"pending"' && ok "回退待发布" || fail "回退异常: $resp"
+echo "$resp" | grep -q '"publishedAt"' && fail "回退后应无 publishedAt: $resp" || ok "回退清空发布时间"
+
+# 4c5. 非法状态 / 超长链接 → 400；不存在的记录 → 404
+printf '%s' '{"status":"boom"}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -X PUT -d @"$TMPBODY" "$BASE/api/v1/creator/works/$E_ID/publications/$P_DY_ID")
+[ "$code" = "400" ] && ok "非法状态 → 400" || fail "非法状态期望 400 实际 $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X PUT -H 'Content-Type: application/json' -d '{"status":"pending"}' "$BASE/api/v1/creator/works/$E_ID/publications/999999")
+[ "$code" = "404" ] && ok "不存在记录 → 404" || fail "不存在记录期望 404 实际 $code"
+
+# 4c6. 列表接口附带发布进度摘要
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/works?q=T9%E5%8F%91%E5%B8%83%E6%B5%8B%E8%AF%95")
+echo "$resp" | grep -q '"publications":\[' && ok "列表附带发布摘要" || fail "列表摘要缺失: $resp"
+
+# 4c7. 清理作品 E（级联发布记录）
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X DELETE "$BASE/api/v1/creator/works/$E_ID")
+[ "$code" = "204" ] && ok "清理作品 E → 204" || fail "清理 E 期望 204 实际 $code"
+
+# ---- 生成与版本（T7，无 key 路径）----
+
+# 4ae. 建作品 D → POST versions → 503（AI key 未配置）
+printf '%s' '{"topic":"T7生成测试"}' > "$TMPBODY"
+D_RESP=$(curl -s -b "$JAR" -H 'Content-Type: application/json' -d @"$TMPBODY" "$BASE/api/v1/creator/works")
+D_ID=$(echo "$D_RESP" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+[ -n "$D_ID" ] || fail "未取到作品 D id"
+printf '%s' '{"platform":"douyin"}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -d @"$TMPBODY" "$BASE/api/v1/creator/works/$D_ID/versions")
+[ "$code" = "503" ] && ok "无 key 生成 → 503" || fail "无 key 生成期望 503 实际 $code"
+
+# 4af. 生成失败不产生版本（版本列表空）
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/works/$D_ID/versions")
+[ "$resp" = "[]" ] && ok "生成失败无版本产生" || fail "应有 0 版本: $resp"
+
+# 4ag. 作品状态未被改动（仍 draft）
+resp=$(curl -s -b "$JAR" "$BASE/api/v1/creator/works/$D_ID")
+echo "$resp" | grep -q '"status":"draft"' && ok "作品状态保持 draft" || fail "作品状态被改动: $resp"
+
+# 4ah. 非法平台 → 400
+printf '%s' '{"platform":"xhs"}' > "$TMPBODY"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -H 'Content-Type: application/json' -d @"$TMPBODY" "$BASE/api/v1/creator/works/$D_ID/versions")
+[ "$code" = "400" ] && ok "非法平台 → 400" || fail "非法平台期望 400 实际 $code"
+
+# 4ai. 清理 D
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X DELETE "$BASE/api/v1/creator/works/$D_ID")
+[ "$code" = "204" ] && ok "清理作品 D → 204" || fail "清理 D 期望 204 实际 $code"
+
 # ---- 认证（续）----
 
 # 5. 登出 → 200；旧 cookie 再访问 → 401

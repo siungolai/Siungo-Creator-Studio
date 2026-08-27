@@ -13,7 +13,7 @@ import (
 	"github.com/siungolai/Siungo-Creator-Studio/server/internal/db"
 )
 
-// testSetup 建内存库（复用生产迁移与平台预置）+ store + service。
+// testSetup 建内存库（复用生产迁移与平台预置）+ store + service（默认无 AI，生成接口返回不可用）。
 func testSetup(t *testing.T) *Service {
 	t.Helper()
 	conn, err := db.Open(":memory:")
@@ -21,7 +21,7 @@ func testSetup(t *testing.T) *Service {
 		t.Fatalf("open db: %v", err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return NewService(NewSQLiteStore(conn))
+	return NewService(NewSQLiteStore(conn), nil)
 }
 
 func TestCreateWorkValidation(t *testing.T) {
@@ -142,13 +142,13 @@ func TestHTTPCreateAndList(t *testing.T) {
 	s := testSetup(t)
 	// 空 topic → 400
 	rec := httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodPost, "/api/v1/creator/works", `{"topic":"  "}`))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodPost, "/api/v1/creator/works", `{"topic":"  "}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("empty topic status = %d, want 400", rec.Code)
 	}
 	// 新建 → 201
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodPost, "/api/v1/creator/works", `{"topic":"AI 口播脚本","title":"测试"}`))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodPost, "/api/v1/creator/works", `{"topic":"AI 口播脚本","title":"测试"}`))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("create status = %d, want 201", rec.Code)
 	}
@@ -161,7 +161,7 @@ func TestHTTPCreateAndList(t *testing.T) {
 	}
 	// 列表包含（分页结构）
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("list status = %d", rec.Code)
 	}
@@ -180,19 +180,19 @@ func TestHTTPDelete(t *testing.T) {
 
 	// 非法 id → 400
 	rec := httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/abc", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/abc", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad id status = %d, want 400", rec.Code)
 	}
 	// 不存在 → 404
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/999999", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/999999", ""))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("missing status = %d, want 404", rec.Code)
 	}
 	// 存在 → 204
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)), ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodDelete, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)), ""))
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("delete status = %d, want 204", rec.Code)
 	}
@@ -201,7 +201,7 @@ func TestHTTPDelete(t *testing.T) {
 func TestHTTPPlatforms(t *testing.T) {
 	s := testSetup(t)
 	rec := httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/platforms", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/platforms", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("platforms status = %d", rec.Code)
 	}
@@ -320,7 +320,7 @@ func TestHTTPGetAndUpdate(t *testing.T) {
 
 	// GET 详情 → 200
 	rec := httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)), ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)), ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want 200", rec.Code)
 	}
@@ -334,14 +334,14 @@ func TestHTTPGetAndUpdate(t *testing.T) {
 
 	// GET 不存在 → 404
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works/999999", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works/999999", ""))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("get missing status = %d, want 404", rec.Code)
 	}
 
 	// PUT 更新 → 200
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)),
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)),
 		`{"topic":"改后主题","style":"tucao","status":"published","tags":["x"],"script":"副本内容"}`))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("put status = %d, want 200", rec.Code)
@@ -356,7 +356,7 @@ func TestHTTPGetAndUpdate(t *testing.T) {
 
 	// PUT 非法状态 → 400
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)),
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/"+strconv.Itoa(int(w.ID)),
 		`{"topic":"x","style":"default","status":"bad"}`))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("put bad status = %d, want 400", rec.Code)
@@ -364,7 +364,7 @@ func TestHTTPGetAndUpdate(t *testing.T) {
 
 	// PUT 不存在 → 404
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/999999",
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodPut, "/api/v1/creator/works/999999",
 		`{"topic":"x","style":"default","status":"draft"}`))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("put missing status = %d, want 404", rec.Code)
@@ -452,7 +452,7 @@ func TestHTTPListFilterPaging(t *testing.T) {
 
 	// limit=2 分页结构
 	rec := httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?limit=2", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?limit=2", ""))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -466,13 +466,13 @@ func TestHTTPListFilterPaging(t *testing.T) {
 
 	// 非法 limit → 400
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?limit=abc", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?limit=abc", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad limit status = %d, want 400", rec.Code)
 	}
 	// 非法 status → 400
 	rec = httptest.NewRecorder()
-	s.Routes().ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?status=bad", ""))
+	s.Routes(nil).ServeHTTP(rec, httpRequest(http.MethodGet, "/api/v1/creator/works?status=bad", ""))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("bad status status = %d, want 400", rec.Code)
 	}
