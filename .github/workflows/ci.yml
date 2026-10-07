@@ -1,0 +1,54 @@
+# 规范 C8.2：推送时自动跑构建与检查。
+#
+# 这里跑的就是本机 `bash scripts/verify.sh` 那一批命令 —— 两边刻意保持同源，
+# 别只改一边（改门禁时先改 scripts/verify.sh，再回来对齐本文件）。
+#
+# 为什么拆成两个平行 job 而不是直接调 verify.sh：
+#   两个 job 各自能拿到 Go / npm 的依赖缓存，且任何一边红了另一半不用重跑。
+#   代价是多一次 checkout，换来的是"哪一端坏了"一眼可见。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    name: 后端 · go build / vet / test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@v4
+      # 版本不在 workflow 里钉死，跟着 go.mod 走。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache: true
+          # lockfile 不在仓库根，必须写，否则 cache 找不到。
+          cache-dependency-path: server/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: go test ./...
+
+  frontend:
+    name: 前端 · tsc / oxlint / vite build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      # 用 ci 而不是 install：lockfile 与 package.json 不一致时直接失败，
+      # 而不是悄悄改 lockfile。
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm run build
