@@ -20,10 +20,11 @@
 # 退出码：0 = 没有 FAIL（SKIP / 豁免不算）；1 = 有 FAIL；2 = 环境或配置错误
 #
 # ── 为什么要有它 ──
-# 规范（docs/standards/conformance-gate.md §1）把 88 条条款分三档，其中 ② 档
-# 「半机械，要跑起来才能判」共 14 条，原本被指派给"各站的 smoke"。实做下来那个
-# 指派只对 6 条成立 —— 另外 8 条的判据宾语在**生产服务器**上（`/etc/`、systemd
-# 定时器、真实数据目录、历史部署动作），smoke 侧根本拿不到。所以拆成两边：
+# 规范（docs/standards/conformance-gate.md §1）把 109 条条款分三档：① 机检 94 条 ·
+# ② 半机械 8 条 · ③ 只能靠人 7 条。其中 ② 档「半机械，要跑起来才能判」共 8 条，
+# 原本被指派给"各站的 smoke"。实做下来那个指派只对 3 条成立（A2.6 / C4.5 / A2.13）——
+# 另外 5 条的判据宾语在**生产服务器**上（`/etc/`、systemd 定时器、真实数据目录、
+# 历史部署动作），smoke 侧根本拿不到。所以拆成两边：
 #
 #   · 本文件：本机判得了的那一半（HTTP 形状、本地进程绑定、空库跑迁移…）
 #   · Siungo-Workspace/scripts/server-audit.sh：要 ssh 上生产的那一半
@@ -83,6 +84,31 @@ PROBE_LOGIN_PATH="${PROBE_LOGIN_PATH:-}"
 PROBE_LOGIN_BODY="${PROBE_LOGIN_BODY:-}"
 PROBE_EXTRA_HEADERS=()   # 如 -H "Origin: …"（CSRF 站必须给）
 PROBE_AUTH_HEADERS=()    # 如 -H "Authorization: Bearer …"
+
+# ── 后半 5 条（A1.1 / A1.11 / A1.12 / A1.14 / A3.11）需要的站点声明 ────────
+# A1.1：站点**真实对外**的端点清单（空格分隔）。缺省的退回顺序：
+#       PROBE_LIST_ENDPOINTS + PROBE_ERROR_PATH；再缺就 SKIP 并说明。
+PROBE_API_PATHS="${PROBE_API_PATHS:-}"
+# A1.1：健康检查路径。规范 A1.15 允许它不带 /api 前缀，所以单独给变量。
+PROBE_HEALTH_PATH="${PROBE_HEALTH_PATH:-/api/health}"
+# A1.11：**用正确凭据**登录一次的端点与请求体（与 A1.13 的错误凭据是两回事）。
+PROBE_SESSION_LOGIN_PATH="${PROBE_SESSION_LOGIN_PATH:-}"
+PROBE_SESSION_LOGIN_BODY="${PROBE_SESSION_LOGIN_BODY:-}"
+# A1.12：写端点（用来验"关掉浏览器的自动 CSRF 豁免之后拦不拦"）。
+#        不声明时退回 PROBE_SESSION_LOGIN_PATH（登录本身也是非安全方法）。
+PROBE_CSRF_ENDPOINT="${PROBE_CSRF_ENDPOINT:-}"
+PROBE_CSRF_METHOD="${PROBE_CSRF_METHOD:-POST}"
+PROBE_CSRF_BODY="${PROBE_CSRF_BODY:-}"
+# A1.14：本站登录是否按 IP 限流。**只有显式写 1 才判**，不声明一律 SKIP ——
+#        "猜一个限流键"会把按账号限流的站（orderflow 按邮箱）判成假红。
+PROBE_IP_KEYED_RATELIMIT="${PROBE_IP_KEYED_RATELIMIT:-0}"
+# A3.11：本站上传是否**做图片处理**（读 EXIF / 转码）。只有显式写 1 才判 ——
+#        不做图片处理的站，"坏图片字节"测的只是字节存储，判了等于没判。
+PROBE_IMAGE_UPLOAD="${PROBE_IMAGE_UPLOAD:-0}"
+# A3.11：候选上传端点（`basic` 的取值顺序）。
+PROBE_UPLOAD_ENDPOINT2="${PROBE_UPLOAD_ENDPOINT2:-}"
+PROBE_UPLOAD_ENDPOINT3="${PROBE_UPLOAD_ENDPOINT3:-}"
+PROBE_UPLOAD_FIELD3="${PROBE_UPLOAD_FIELD3:-file}"
 
 probe_setup() { echo "hooks 没有提供 probe_setup（也没给 PROBE_BASE_URL）" >&2; return 1; }
 probe_teardown() { :; }
@@ -463,7 +489,369 @@ probe_A213() {
 
 # ── 逐条跑 ─────────────────────────────────────────────────────────────────
 # hooks 里可以写 PROBE_REASON_A12="……" 之类，给 SKIP 一条人话理由。
-for c in A1.7 A1.5 A1.2 A1.4 A1.9 A1.10 A1.13 A2.6 C4.5 A2.13; do
+
+# ────────────────────────────────────────────────────────────────────────────
+# A1.1 端点必须挂在 /api 下且不带版本段
+#      本机判得了：① 声明的端点真可达 ② /api→/api/v1 的同一尾段必须 404
+#      判不了：nginx location / Vite proxy / 前端 API_BASE 那三处是否对齐
+#      —— 判据的宾语是**部署配置**，那是 server-audit.sh 的活（写进 detail）。
+# ────────────────────────────────────────────────────────────────────────────
+probe_A11() {
+	local list="${PROBE_API_PATHS}"
+	[ -n "$list" ] || list="${PROBE_LIST_ENDPOINTS} ${PROBE_ERROR_PATH}"
+	if [ -z "$(printf '%s' "$list" | tr -d ' \t')" ]; then
+		record A1.1 SKIP "hooks 没声明 PROBE_API_PATHS（也没给 PROBE_LIST_ENDPOINTS/PROBE_ERROR_PATH）"
+		return
+	fi
+	local p n=0 code bad=""
+	# 探通全部端点（$WORK 是本次运行的临时目录，退出即删）
+	for p in $list; do
+		n=$((n + 1))
+		req "a11_${n}" "${URL}${p}" "${PROBE_EXTRA_HEADERS[@]}"
+		code="$(code_of "a11_${n}")"
+		case "$code" in
+			000|404) bad="${bad} ${p}→${code}（声明为真端点却不通）;" ;;
+		esac
+	done
+	# 版本别名：把 **第一个** /api 换成 /api/v1 —— 站内 200（存在版本别名），站外 404（不存在）
+	local p1 alias ac
+	for p1 in $list; do
+		alias="$(printf '%s' "$p1" | sed 's#/api#/api/v1#')"
+		[ "$alias" != "$p1" ] || continue
+		req a11_alias "${URL}${alias}" "${PROBE_EXTRA_HEADERS[@]}"
+		ac="$(code_of a11_alias)"
+		if [ "$ac" = "200" ]; then
+			bad="${bad} ${p1} 同时存在版本别名 ${alias}（200）;"
+		fi
+		break
+	done
+	# 健康检查必须活着（A1.15 规定它自己最简，可豁免 /api 前缀）
+	local hc
+	if [ -n "${PROBE_HEALTH_PATH}" ]; then
+		req a11_h "${URL}${PROBE_HEALTH_PATH}"
+		hc="$(code_of a11_h)"
+		case "$hc" in
+			2*) ;;
+			*) bad="${bad} ${PROBE_HEALTH_PATH}→${hc}（健康检查必须 2xx）;" ;;
+		esac
+	fi
+	if [ -n "$bad" ]; then
+		record A1.1 FAIL "路由形状不对：${bad# }"
+	else
+		record A1.1 PASS "声明的端点全部可达、没有 /api/v1 别名、${PROBE_HEALTH_PATH} 2xx（探了 ${n} 条）"
+	fi
+	echo "          ⚠️ 判不了的那半：nginx \`location\`、Vite dev proxy、前端 API_BASE 三处是否按同一前缀分流"
+	echo "             —— 少一层会落 SPA 回退，浏览器拿到 HTML（Unexpected token 尖括号）。本机只证了服务端路由形状，"
+	echo "             部署侧请看 Siungo-Workspace/scripts/server-audit.sh。"
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# A1.11 浏览器会话凭证必须是 HttpOnly Cookie，不得交给 JS
+#      本机判得了：登录响应到底下不下发 Cookie、下发的 cookie 属性写全没有
+#      判不了：登录响应体里的 token 被前端拿去放哪儿（= 机检扫 localStorage 的活）、
+#              TTL 续期、以及"服务端是否只存 sha256"
+# ⚠️ 本函数把会话 Cookie 落成纯文本 ${WORK}/ph2_cookie.txt，供 probe_A112 复用。
+# ────────────────────────────────────────────────────────────────────────────
+# PH2-EPOCH: 把 HTTP 日期转成 epoch 秒。优先 GNU date -d（Linux CI），
+# 退回 BSD date -j -f（macOS），都没有就打印空串（调用方只把结果当"解析得出上限"用）。
+ph2_epoch() { # $1 = HTTP 日期字符串（如 Fri, 01 Jan 2027 00:00:00 GMT）
+	local d="$1" e
+	e="$(date -u -d "$d" +%s 2>/dev/null)" || e=""
+	[ -n "$e" ] && { printf '%s' "$e"; return 0; }
+	e="$(date -j -u -f '%a, %d %b %Y %T GMT' "$d" +%s 2>/dev/null)" || e=""
+	printf '%s' "$e"
+	return 0
+}
+
+ph2_session_cookie_name() { # $1=WORK 目录 → 打印会话 Cookie 的名字（没有则空）
+	sed -n 's/^[Ss]et-[Cc]ookie:[[:space:]]*\([^=;]*\)=.*/\1/p' "${1}/a111.hdr" 2>/dev/null \
+		| tr -d '\r' | grep -v '^$' | tail -1
+}
+
+probe_A111() {
+	if [ -z "${PROBE_SESSION_LOGIN_PATH}" ]; then
+		record A1.11 SKIP "hooks 没声明 PROBE_SESSION_LOGIN_PATH（正确凭据的登录端点）"
+		return
+	fi
+	req a111 -X POST "${URL}${PROBE_SESSION_LOGIN_PATH}" \
+		-H 'Content-Type: application/json' "${PROBE_EXTRA_HEADERS[@]}" \
+		-d "${PROBE_SESSION_LOGIN_BODY}"
+	local code; code="$(code_of a111)"
+	if [ -z "$code" ] || [ "$code" = "000" ]; then
+		record A1.11 SKIP "登录端点 ${PROBE_SESSION_LOGIN_PATH} 连不上（curl 000）—— 先修 hooks 的凭据/端点"
+		return
+	fi
+	local body; body="$(flat_of a111)"
+	local line; line="$(tr -d '\r' < "${WORK}/a111.hdr" | grep -i '^set-cookie:' | head -1)"; line="${line#*: }"
+	if [ -z "$line" ]; then
+		# 没有 Cookie：body 里出现会话 token/JWT 就是把凭证交给了 JS
+		if printf '%s' "$body" | grep -q '"token"[[:space:]]*:[[:space:]]*"'; then
+			record A1.11 FAIL "登录回 ${code} 且一个 Set-Cookie 都没有，body 里却带 token 字段 —— 会话凭证只能进 Web Storage（同源任何脚本可读，一次 XSS 全带走），且服务端无法察觉"
+		elif printf '%s' "$body" | grep -qE '[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'; then
+			record A1.11 FAIL "登录回 ${code}、零 Set-Cookie，body 里能看到三段点分 JWT —— 同上，必须改成 HttpOnly Cookie"
+		elif [ "$code" = "200" ]; then
+			record A1.11 SKIP "登录 ${code} 但既无 Set-Cookie 也看不出 token —— 多半是 hooks 里的 PROBE_SESSION_LOGIN_BODY 不是真能登录的凭据"
+		else
+			record A1.11 N/A "登录回 ${code} 且没有下发会话 Cookie —— 本站浏览器端会话不用 Cookie；凭据写法判不了（条款对本形态不适用）"
+		fi
+		return
+	fi
+	# 有 Cookie：逐项对条款的属性表
+	local rest name=http
+	rest="${line#*;}"
+	name="$(printf '%s' "$line" | sed -n 's/^\([^=]*\)=.*/\1/p')"
+	case "$line" in *"; HttpOnly"*|*";HttpOnly"*|*"HttpOnly"*) http=1 ;; *) http=0 ;; esac
+	case "$rest" in *"Path=/"*) path=1 ;; *) path=0 ;; esac
+	local ss="" m
+	for m in Strict Lax None; do case "$rest" in *"SameSite=${m}"*) ss="$m" ;; esac; done
+	local bad="" det=""
+	[ "$http" = "1" ] || bad="${bad} 缺 HttpOnly;"
+	[ "$path" = "1" ] || bad="${bad} 缺 Path=/;"
+	case "$ss" in
+		Lax) ;;
+		"")  bad="${bad} 缺 SameSite（条款要求 Lax）;" ;;
+		*)   bad="${bad} SameSite=${ss}（条款要求 Lax；Strict 会让外部链接进来的首屏变未登录态，None 等于不设防）;" ;;
+	esac
+	# TTL：Max-Age 秒数 / Expires 绝对时间，取到哪个算哪个。上限 14 天。
+	local maxage expi secs now
+	maxage="$(printf '%s' "$rest" | sed -n 's/.*Max-Age=\([0-9]*\).*/\1/p')"
+	expi="$(printf '%s' "$rest" | sed -n 's/.*[Ee]xpires=\([^;]*\).*/\1/p')"
+	if [ -n "$maxage" ] && [ "$maxage" -gt 1209600 ] 2>/dev/null; then
+		bad="${bad} Max-Age=${maxage}s 超过 14 天;"
+	elif [ -z "$maxage" ] && [ -n "$expi" ]; then
+		secs="$(ph2_epoch "$expi")"; now="$(date -u +%s 2>/dev/null)"
+		if [ -n "$secs" ] && [ -n "$now" ] && [ "$secs" -gt "$((now + 1209600))" ] 2>/dev/null; then
+			bad="${bad} Expires=${expi} 超过 14 天;"
+		fi
+	fi
+	if [ -n "$bad" ]; then
+		record A1.11 FAIL "会话 Cookie 属性不合条款：${bad# }（实测：${line}）"
+	else
+		record A1.11 PASS "会话 Cookie 属性齐：HttpOnly + Path=/ + SameSite=Lax（实测：${line}）"
+	fi
+	[ -n "$maxage" ] || det="${det} TTL：Max-Age 缺失，Expires 解析不出上限;"
+	det="${det} 7 天续期阈值的宽限期日志（条款要求）判不了;"
+	det="${det} 服务端是否只存 token 的 sha256 判不了（那是服务端存储，不在 HTTP 面上）;"
+	[ "$name" = "session" ] || det="${det} ⚠️ cookie 名是 ${name} 而不是条款写的 session（只记不下判：orderflow 的 sid 是标杆）;"
+	case "${URL}" in
+		https://*) case "$line" in *"Secure"*) ;; *) bad="Secure 缺失"; det="${det} ⚠️ https 下缺 Secure;" ;; esac ;;
+		*) det="${det} Secure 未判（本机 http，浏览器本来就不回传它）；生产必须 true，需 https 才判得了;" ;;
+	esac
+	printf '%s' "$line" > "${WORK}/ph2_cookie.txt"
+	[ -n "$det" ] && echo "          ℹ️${det}"
+	return 0
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# A1.12 用了 Cookie 就必须有 CSRF 来源校验（所有非安全方法）
+#      本机判得了：不带 Origin/Referer 会不会被拒、外站 Origin 会不会被拒、
+#                  带本站 Origin 会不会**因为 CSRF 本身**被拒
+#      判不了：SameSite=Lax 之外浏览器侧的兜底行为、以及将来写操作变 GET 的回归
+# ⚠️ 依赖 probe_A111 落下的 ${WORK}/ph2_cookie.txt（A1.11 在本清单里排在它前面）。
+# ────────────────────────────────────────────────────────────────────────────
+probe_A112() {
+	local cookie=""
+	[ -f "${WORK}/ph2_cookie.txt" ] && cookie="$(cat "${WORK}/ph2_cookie.txt")"
+	if [ -z "$cookie" ]; then
+		record A1.12 N/A "A1.11 那一步没看到会话 Cookie（本站会话不用 Cookie）—— 本条不适用；一旦按 A1.11 改造立刻适用"
+		return
+	fi
+	local ep="${PROBE_CSRF_ENDPOINT}"
+	[ -n "$ep" ] || ep="${PROBE_SESSION_LOGIN_PATH}"
+	if [ -z "$ep" ]; then
+		record A1.12 SKIP "hooks 没声明 PROBE_CSRF_ENDPOINT（也没给 PROBE_SESSION_LOGIN_PATH）"
+		return
+	fi
+	# cookie 名 + 值：Set-Cookie 原文取第一个分号之前那一段（PH2-A112-1）
+	local nv; nv="$(sed -n '1s/[[:space:]]*$//p' "${WORK}/ph2_cookie.txt" | cut -d';' -f1)"
+	local origin="https://evil.example"
+	local base="${URL#*://}"; base="${base%%/*}"
+	local me="http://${base}"; me="${me%/}"
+	local args=(-X "${PROBE_CSRF_METHOD}" -H 'Content-Type: application/json' -H "Cookie: ${nv}")
+	# ⚠️ PH2-A112-2：三个请求**各用一份写坏的 body**（`__I__` → 固定串），别共用。
+	# 共用过：A1.12 判据是"这一条能不能穿过 CSRF"，但共用同一份合法 body 时，
+	# 第一条**真的会打到 handler**（CSRF 坏掉的那种站就是这么被发现的）并建出一个资源，
+	# 第二条起拿到的是业务层的 duplicate_name/409 —— 探针就会把 409 读成"跨站写请求没被拦"，
+	# 判出来的 FAIL 是被判对象之外的噪声（2026-10-07 在 orderflow 上实测踩到）。
+	# 用固定串而不是真实唯一值：判据只关心"拦没拦"，不关心资源建没建成；
+	# `__I__` 是引擎既有的占位符约定（probe_A113 也用），站点可以在 PROBE_CSRF_BODY 里用它。
+	local csrf_body
+	csrf_body="$(printf '%s' "${PROBE_CSRF_BODY}" | sed 's/__I__/spec-probe-csrf/g')"
+	# ⚠️ PH2-A112-3（2026-10-07 在 orderflow 上实测踩到，报 code=403000）：
+	# 把站点预置的 `Origin:` 摘掉 —— 但**不能只摘值**。`-H` 与它的值是数组里相邻的两个元素，
+	# 只删掉值会留下一个**没有值的 `-H`**；curl 会把紧随其后的参数当成这个头的值
+	# （我们这里正好是 `-d` 与 JSON），于是报
+	#   `curl: (3) URL rejected: Port number was not a decimal number between 0 and 65535`
+	# 而 `-w '%{http_code}'` 已经把状态码落盘、`req()` 里的 `|| true` 把非零退出吞掉，
+	# 残留的 `000` 与上一次的 `403` 粘成 **`403000`**，被探针读成"非 403" ⟹ 假红。
+	# 所以按**成对**摘：滤的时候记住"上一个进来的元素是选项"，遇到要摘的头就把那个选项一起退掉。
+	# 两个细节：① `${#arr[@]}` 是空数组的正确守卫（`${arr[@]+…}` 在空/未设时不可靠）；
+	#           ② `local -a x=()` 之后再 `x+=(…)` 在某些上下文里会把值吃掉，用索引赋值最稳。
+	local -a filt=(); local h n=0 last_opt=""
+	if [ "${#PROBE_EXTRA_HEADERS[@]}" -gt 0 ]; then
+		for h in "${PROBE_EXTRA_HEADERS[@]}"; do
+			case "$h" in
+				[Oo][Rr][Ii][Gg][Ii][Nn]:*)
+					if [ "$last_opt" = "1" ] && [ "${#filt[@]}" -gt 0 ]; then
+						unset "filt[$((${#filt[@]} - 1))]"
+					fi
+					last_opt=""
+					continue
+					;;
+			esac
+			case "$h" in -*) last_opt="1" ;; *) last_opt="0" ;; esac
+			filt[${#filt[@]}]="$h"
+		done
+	fi
+	local -a extra=()
+	n=0
+	while [ "$n" -lt "${#filt[@]}" ]; do
+		extra[${#extra[@]}]="${filt[$n]}"
+		n=$((n + 1))
+	done
+	# 自检：数组长度必须是偶数（`-H`/`--header` 都成对），奇数说明配对被破坏 ⟹ 宁可不带头。
+	if [ $(( ${#extra[@]} % 2 )) -ne 0 ]; then
+		extra=()
+	fi
+	req csrf_a "${URL}${ep}" "${args[@]}" "${extra[@]}" -d "${csrf_body}"
+	req csrf_b "${URL}${ep}" "${args[@]}" "${extra[@]}" -H "Origin: ${origin}" -d "${csrf_body}"
+	req csrf_c "${URL}${ep}" "${args[@]}" "${extra[@]}" -H "Origin: ${me}" -H "Referer: ${origin}/" -d "${csrf_body}"
+	local ca cb cc fa fb fc bad=""
+	ca="$(code_of csrf_a)"; cb="$(code_of csrf_b)"; cc="$(code_of csrf_c)"
+	fa="$(flat_of csrf_a | head -c 160)"; fb="$(flat_of csrf_b | head -c 160)"; fc="$(flat_of csrf_c | head -c 160)"
+	# ⚠️ PH2-A112-4：判据要按"谁先拦"分级，不能只认 403。
+	# 本条真判的是"**关掉浏览器自动豁免之后**来源校验还在不在场"：
+	#   · 403 + csrf_failed ⟹ 来源校验拦住了（条款原样）；
+	#   · 401（或 403/其它非 CSRF 码）⟹ 请求**穿过了 CSRF 这一层**才被鉴权/业务层拦下
+	#     ——"这一关"是过了的，但拿不到直接证据，所以记 PASS 并在 detail 里说明；
+	#   · 2xx / 业务码（201/409 …）⟹ 请求带着 cookie 一路打到 handler ⟹ 来源校验不在场 ⟹ FAIL。
+	local soft=""
+	case "$ca" in
+		403) printf '%s' "$fa" | grep -q 'csrf_failed' || bad="${bad} 不带 Origin/Referer 回了 403 但 body 里没有 csrf_failed（分不清是 CSRF 拦的还是权限拦的）；" ;;
+		401) soft="${soft} (a) 401（鉴权先拦，CSRF 层的直接证据没拿到）；" ;;
+		000) bad="${bad} 不带 Origin/Referer 请求根本没发出去（curl 失败）；" ;;
+		*) bad="${bad} 不带 Origin/Referer 回 ${ca}（条款要求 403 csrf_failed）；" ;;
+	esac
+	case "$cb" in
+		403) printf '%s' "$fb" | grep -q 'csrf_failed' || bad="${bad} Origin=${origin} 回 403 但 body 不是 csrf_failed（分不清谁拦的）；" ;;
+		401) soft="${soft} (b) 401（鉴权先拦）；" ;;
+		000) bad="${bad} Origin=${origin} 请求根本没发出去（curl 失败）；" ;;
+		*) bad="${bad} Origin=${origin} 回 ${cb}（跨站写请求没被拦）；" ;;
+	esac
+	# (c) 本站 Origin（Referer 故意写成外站，验"Origin 优先"）→ 不得因 CSRF 被判 403
+	if [ "$cc" = "403" ] && printf '%s' "$fc" | grep -q 'csrf_failed'; then
+		bad="${bad} 本站 Origin 也被 CSRF 拒了（Origin 优先没生效）；"
+	fi
+	if [ -n "$bad" ]; then
+		record A1.12 FAIL "${bad# }（cookie=${nv%%=*}；a=${ca} b=${cb} c=${cc}；a.body=${fa}；b.body=${fb}；c.body=${fc}）"
+	else
+		local note=""
+		[ "$cc" = "403" ] && note="；⚠️ 本站 Origin 也回 403 但 body 里不是 csrf_failed（需人工看一眼是不是中间件顺序问题）"
+		record A1.12 PASS "非安全方法校验来源：缺头 ${ca}、外站 Origin ${cb}、本站 Origin ${cc}（后两问没被 CSRF 拦）${soft}${note}"
+	fi
+	echo "          ℹ️ (c) 回 ${cc} 只说明「过了 CSRF 这关」（401/400/其它业务码都算过）；SameSite=Lax 仍只是浏览器侧兜底，不等于服务端保证。"
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# A1.14 真实 IP 只能取自 nginx 直设的头，且只在来源是回环时才信任转发头
+#      本机判得了：**限流键到底听谁** —— 每个请求换 XFF（不带 X-Real-IP）会不会
+#                  每次都拿到全新预算；固定 X-Real-IP 连打会不会被计到同一个键
+#      判不了：生产 nginx 到底有没有覆写这两个头（判据宾语是 nginx 配置）
+# ⚠️ 只声明 PROBE_IP_KEYED_RATELIMIT=1 才判。本探针会**真的把本机来源打满**
+#    （诚实代价：A1.13 之后若同一次运行里还有别的登录探针，请单独跑），
+#    所以站点用 PROBE_SKIP=A1.14 排除它时要写明理由。
+# ────────────────────────────────────────────────────────────────────────────
+probe_A114() {
+	case "${PROBE_IP_KEYED_RATELIMIT}" in
+		1) ;;
+		*) record A1.14 SKIP "hooks 未声明 PROBE_IP_KEYED_RATELIMIT=1（本站登录不按 IP 限流，或不详）；判据是限流键，猜一个键会把按账号限流的站判成假红"; return ;;
+	esac
+	if [ -z "${PROBE_LOGIN_PATH}" ]; then
+		record A1.14 SKIP "hooks 没声明 PROBE_LOGIN_PATH（按 IP 限流却没有登录端点？）"
+		return
+	fi
+	local i code hitx=-1 hity=-1 xff
+	for i in 1 2 3 4 5 6 7 8; do
+		xff="203.0.113.${i}"
+		req "ip_x${i}" -X POST "${URL}${PROBE_LOGIN_PATH}" -H 'Content-Type: application/json' \
+			"${PROBE_EXTRA_HEADERS[@]}" -H "X-Forwarded-For: ${xff}" \
+			-d "$(printf '%s' "${PROBE_LOGIN_BODY}" | sed "s/__I__/x${i}/g")"
+		code="$(code_of "ip_x${i}")"
+		if [ "$code" = "429" ]; then hitx=$i; break; fi
+	done
+	for i in 1 2 3 4 5 6 7 8; do
+		req "ip_y${i}" -X POST "${URL}${PROBE_LOGIN_PATH}" -H 'Content-Type: application/json' \
+			"${PROBE_EXTRA_HEADERS[@]}" -H "X-Real-IP: 203.0.113.7" \
+			-d "$(printf '%s' "${PROBE_LOGIN_BODY}" | sed "s/__I__/y${i}/g")"
+		code="$(code_of "ip_y${i}")"
+		if [ "$code" = "429" ]; then hity=$i; break; fi
+	done
+	local det="  （键=X-Real-IP-分支第 ${hity} 次触发；键=X-Forwarded-For-分支第 ${hitx} 次触发，-1=没触发）"
+	if [ "$hitx" = "-1" ]; then
+		record A1.14 FAIL "不带 X-Real-IP、每个请求换一个 X-Forwarded-For(203.0.113.n) 连打 8 次一次限流都没触发 —— 限流键跟着**客户端可伪造的 XFF** 走，按 IP 限流等于没有${det}"
+	elif [ "$hity" = "-1" ]; then
+		record A1.14 FAIL "固定 X-Real-IP 连打 8 次也没触发限流 —— 限流键不在 X-Real-IP 上（条款顺序①要求优先取它）${det}"
+	else
+		record A1.14 PASS "限流键跟着 X-Real-IP 走；且只给 XFF（不带 X-Real-IP）时第 ${hitx} 次就被拦了（没退而信 XFF）${det}"
+	fi
+	echo "          ⚠️ 回环来源本身允许被信任转发头 —— 这条判的是没有 X-Real-IP 时会不会退而信 XFF，"
+	echo "             以及限流键最终绑定在哪个头上。生产上 nginx 是否覆写这两个头、RemoteAddr 是否回环，"
+	echo "             本机判不了（判据宾语是 nginx 配置），见 server-audit.sh。"
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# A3.11 图片处理的坏输入不得 5xx、不得把进程打死
+#      本机判得了：无 EXIF 的合法 PNG / 坏 EXIF 段 / 畸形 TIFF 三份下去，
+#                  ① 都不是 5xx ② 三次之后服务还活着
+#      判不了：图片内容有没有被破坏（EXIF 失败路径必须 return "没有"、不得中断
+#              上传）—— 那要在响应里回读照片记录，得站点自证
+# ⚠️ 只在 PROBE_IMAGE_UPLOAD=1 的站判（不做图片处理的站，坏字节测的只是存储）。
+# ────────────────────────────────────────────────────────────────────────────
+# PH2-BADS: 三份坏输入。"字节必须真合法"说的是容器头/魔数，不是内容。
+ph2_make_bad_images() { # $1 = WORK 目录
+	printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > "$1/bad1.png" 2>/dev/null
+	printf '\377\330\377\341\000\020Exif\000\000MM\000\052\000\000\000\010\000\001\001\032\000\005\000\000\000\001\000\000\000\000\000\000\000' > "$1/bad2.jpg"
+	printf 'II\052\000\377\377\377\177\000\000\000\000\000\000\000\000\000\000' > "$1/bad3.tif"
+}
+
+probe_A311() {
+	case "${PROBE_IMAGE_UPLOAD}" in
+		1) ;;
+		*) record A3.11 SKIP "hooks 未声明 PROBE_IMAGE_UPLOAD=1（本站上传不做图片处理/无上传端点）；坏图片字节测不出条款要的东西"; return ;;
+	esac
+	local ep="${PROBE_UPLOAD_ENDPOINT}" field="${PROBE_UPLOAD_FIELD}"
+	[ -n "$ep" ] || { ep="${PROBE_UPLOAD_ENDPOINT2}"; field="${PROBE_UPLOAD_FIELD2}"; }
+	if [ -z "$ep" ]; then ep="${PROBE_UPLOAD_ENDPOINT3}"; field="${PROBE_UPLOAD_FIELD3}"; fi
+	if [ -z "$ep" ]; then record A3.11 SKIP "hooks 没声明 PROBE_UPLOAD_ENDPOINT（上传端点）"; return; fi
+	[ -n "$field" ] || field="file"
+	ph2_make_bad_images "${WORK}"
+	local names="bad1.png bad2.jpg bad3.tif" nm code bad=""
+	for nm in $names; do
+		req "a311_${nm}" -X POST "${URL}${ep}" "${PROBE_AUTH_HEADERS[@]}" "${PROBE_EXTRA_HEADERS[@]}" \
+			-F "${field}=@${WORK}/${nm};type=application/octet-stream"
+		code="$(code_of "a311_${nm}")"
+		case "$code" in
+			5*|000) bad="${bad} ${nm}→${code} $(flat_of "a311_${nm}" | head -c 120);" ;;
+		esac
+	done
+	# 三次之后进程必须还活着
+	local hp="${PROBE_HEALTH_PATH}"
+	[ -n "$hp" ] || hp="${PROBE_404_PATH}"
+	req a311_up "${URL}${hp}"
+	local up; up="$(code_of a311_up)"
+	case "$up" in
+		000) bad="${bad} 三次坏输入之后 ${hp} 连不上（进程被打死了？）;" ;;
+	esac
+	if [ -n "$bad" ]; then
+		record A3.11 FAIL "坏输入把上传打崩了：${bad# }"
+	else
+		record A3.11 PASS "三份坏输入都非 5xx（$(code_of a311_bad1.png)/$(code_of a311_bad2.jpg)/$(code_of a311_bad3.tif)），之后 ${hp} 仍回 ${up}"
+	fi
+	echo "          ℹ️ 判不了的那半：条款还要 EXIF 读失败必须返回「没有」、且不得中断上传 ——"
+	echo "             本机只证了不 5xx + 进程不死；图片内容/照片记录有没有被破坏要站点自己回读（见 §6）。"
+}
+
+for c in A1.7 A1.5 A1.2 A1.4 A1.1 A1.11 A1.12 A1.9 A1.10 A1.13 A1.14 A3.11 A2.6 C4.5 A2.13; do
 	id="$(echo "$c" | tr -d '.')"
 	if skipped "$c"; then
 		rv="PROBE_REASON_${id}"

@@ -187,6 +187,19 @@ PROBE_BODY_LIMIT=8192
 # A1.13 的映射。登录只认 {"password":…}（auth_http.go:15-17），body 里 __I__ 换成第几次。
 PROBE_LOGIN_PATH="/api/v1/login"
 PROBE_LOGIN_BODY='{"password":"spec-probe-wrong-__I__"}'
+# ── 后半 5 条（A1.1 / A1.11 / A1.12 / A1.14 / A3.11）需要的站点声明 ──────────
+# A1.1：本站整站挂 /api/v1 ⟹ **预期 FAIL**（机检 21 处，已登记豁免）。
+PROBE_API_PATHS="/api/v1/creator/works /api/v1/creator/platforms"
+PROBE_HEALTH_PATH="/api/v1/health"
+# A1.11：本站是**唯一**的 Cookie 会话站（auth.go:21 SessionCookie="session"、
+# auth_http.go:61 http.SetCookie）⟹ 探针应当抓到 SameSite=Strict（条款要 Lax）= 预期 FAIL。
+PROBE_SESSION_LOGIN_PATH="/api/v1/login"
+PROBE_SESSION_LOGIN_BODY="{\"password\":\"${PROBE_STUDIO_PASSWORD}\"}"
+# A1.12：全后端 grep Origin|Referer 零命中 ⟹ 三条来源校验应当全部不成立 = 预期 FAIL。
+PROBE_CSRF_ENDPOINT="/api/v1/creator/works"
+PROBE_CSRF_BODY='{"topic":"spec-probe-csrf"}'
+# A3.11 不判：全仓无 multipart/FormFile（grep 零命中）⟹ 没有上传端点。
+# A1.14 见下面的 PROBE_SKIP。
 
 # C4.5 的端口（本轮在 PROBE_SKIP 里，见下）。
 PROBE_LISTEN_PORT="${PROBE_PORT}"
@@ -204,10 +217,20 @@ PROBE_MIGRATE_CMD="cd server && go test ./internal/creator/ ./internal/auth/ ./i
 # scripts/sync-spec-probe.mjs 对账。
 # 下面六条是 2026-10-07 本探针首次真跑翻出来的真违规（已逐条核实不是规则误报），
 # 依据精确到 file:line，写在豁免表的 reason 里；当天登记，review_by 2027-01-07。
-PROBE_ALLOW_FAIL="A1.7 A1.5 A1.2 A1.4 A1.9 A1.13"
+#
+# A1.11 / A1.12（2026-10-07 当天稍后补）：本条探针**首个**「后半 5 条」真跑翻出来的两处
+# 行为违规 —— A1.11：SameSite=Strict（条款要 Lax，auth_http.go:118）+ TTL 30 天（条款上限
+# 14 天，auth.go:22-23）；A1.12：无 Origin/Referer 的跨站 POST 三问全 **201** 且**真的各建出
+# 一条资源**（全后端 grep Origin|Referer 零命中）。两条的机检那一半当天已登记豁免
+# （creator-studio，review_by 2027-01-07），这里放行的是**同一处事实的另一半**：
+# 机检判"代码里写了什么"，探针判"跑起来真的收下了"。修法不是机械改动（Secure 取决于生产
+# 是否 https 终止；Strict→Lax 是放松安全属性；TTL 口径是产品决定）⟹ 与 A1.9/A1.13 同规格，
+# 记 ALLOW 而不是把它从清单里删掉。**不判 ≠ 通过**。
+PROBE_ALLOW_FAIL="A1.7 A1.5 A1.2 A1.4 A1.9 A1.13 A1.11 A1.12"
 
 # ── 显式排除 ───────────────────────────────────────────────────────────────
-PROBE_SKIP="C4.5"
+PROBE_SKIP="C4.5 A1.14"
+PROBE_REASON_A114="本站没有按 IP 的登录限流（auth_http.go:15-17；grep ratelimit 零命中）—— 按 IP 的限流键在这里没有宾语，行为探针判不了。⚠️ 不判 ≠ 通过：clientIP()（auth_http.go:140-153）不读 X-Real-IP、trustXFF 为真时取 X-Forwarded-For 首段、且没有回环前提（application.md:583-622），已登记豁免。"
 PROBE_REASON_C45="本站 deployed: false（Siungo-Workspace/scripts/stations.json：creator-studio 与 pet 都标了「已写代码未部署，违反 🔴 不计违规；C4.x（部署）整章不适用」）⟹ 没有生产进程可以判"默认绑在哪"。代码这一侧是对的：server/main.go:91 addr := cfg.Host + \":\" + cfg.Port、server/config.go:28 Host: getenv(\"HOST\", \"127.0.0.1\") 都默认回环。等它真部署了，这一条要改成真判。"
 
 # 已经有人起好服务（PROBE_BASE_URL 预置）时顺手把 cookie 取上；取不到只警告不拦。
