@@ -32,6 +32,12 @@ jobs:
       - run: go build ./...
       - run: go vet ./...
       - run: go test ./...
+      # 规范 ② 档探针：真构建 server、真起服务、真发 HTTP 请求再逐条判。
+      # scripts/spec-probe.sh 与母本（Siungo-Workspace/scripts/spec-probe.sh）逐字相同，
+      # 站点专属声明在 scripts/spec-probe.hooks.sh。
+      - name: 规范 ② 档探针
+        working-directory: ${{ github.workspace }}
+        run: bash scripts/spec-probe.sh
 
   frontend:
     name: 前端 · tsc / oxlint / vite build
